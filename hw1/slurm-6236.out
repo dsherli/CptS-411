@@ -1,0 +1,11 @@
+/var/spool/slurm/slurmd/job06236/slurm_script: line 2: SBATCH: command not found
+/var/spool/slurm/slurmd/job06236/slurm_script: line 3: SBATCH: command not found
+/var/spool/slurm/slurmd/job06236/slurm_script: line 4: SBATCH: command not found
+/var/spool/slurm/slurmd/job06236/slurm_script: line 5: SBATCH: command not found
+/var/spool/slurm/slurmd/job06236/slurm_script: line 6: SBATCH: command not found
+Environment on course-cluster-cn3.eecs.wsu.edu
+Running MPI Hello...
+my rank=1
+Rank=1: number of processes =2
+my rank=0
+Rank=0: number of processes =2
