@@ -101,49 +101,20 @@ static void StackedReduce_IntSum(int *local_vec, int local_n, MPI_Comm comm)
   free(recv_buf);
 }
 
-int main(int argc, char **argv)
+// run one (impl, n, p) experiment with the given number of reps
+// writes one CSV line to the given file pointer (rank 0 only)
+static void run_experiment(const char *impl, int n, int reps, MPI_Comm comm,
+                           FILE *outfp)
 {
-  MPI_Init(&argc, &argv);
-
-  MPI_Comm comm = MPI_COMM_WORLD;
   int rank, p;
   MPI_Comm_rank(comm, &rank);
   MPI_Comm_size(comm, &p);
 
-  // usage: ./reduce <impl> <n> <reps>
-  const char *impl = (argc > 1) ? argv[1] : "mpi";
-  int n = (argc > 2) ? atoi(argv[2]) : (1 << 20);
-  int reps = (argc > 3) ? atoi(argv[3]) : 5;
-
-  if (!is_pow2(p))
-  {
-    if (rank == 0)
-      fprintf(stderr, "p must be power of 2\n");
-    MPI_Abort(comm, 1);
-  }
-  if (n <= p)
-  {
-    if (rank == 0)
-      fprintf(stderr, "need n > p\n");
-    MPI_Abort(comm, 1);
-  }
-  if (n % p != 0)
-  {
-    if (rank == 0)
-      fprintf(stderr, "need n multiple of p\n");
-    MPI_Abort(comm, 1);
-  }
-
   int local_n = n / p;
   int *local = (int *)malloc((size_t)local_n * sizeof(int));
   if (!local)
-  {
-    if (rank == 0)
-      fprintf(stderr, "malloc failed\n");
     MPI_Abort(comm, 1);
-  }
 
-  // track best (minimum) time across all reps
   double best_local = 1e300, best_step2 = 1e300, best_total = 1e300;
 
   for (int r = 0; r < reps; r++)
@@ -169,75 +140,75 @@ int main(int argc, char **argv)
 
     double t_local = t1 - t0;
 
-    // time step 2: run whichever all-reduce we're testing
+    // snapshot for stacked verification (before reduce modifies it)
+    int *orig = NULL;
+    if (strcmp(impl, "stacked") == 0)
+    {
+      orig = (int *)malloc((size_t)local_n * sizeof(int));
+      if (!orig)
+        MPI_Abort(comm, 1);
+      memcpy(orig, local, (size_t)local_n * sizeof(int));
+    }
+
+    // time step 2: run the all-reduce
+    int computed = 0;
+    MPI_Barrier(comm);
     double t2 = MPI_Wtime();
 
     if (strcmp(impl, "stacked") == 0)
     {
-      // need to snapshot local before the reduce modifies it in place,
-      // otherwise the oracle MPI_Allreduce would run on already-summed data
-      // and give p*correct_answer instead of correct_answer
-      int *orig = (int *)malloc((size_t)local_n * sizeof(int));
-      if (!orig)
-      {
-        if (rank == 0)
-          fprintf(stderr, "malloc failed\n");
-        MPI_Abort(comm, 1);
-      }
-      memcpy(orig, local, (size_t)local_n * sizeof(int));
-
       StackedReduce_IntSum(local, local_n, comm);
-
-      // check against MPI's built-in answer
-      int *oracle = (int *)malloc((size_t)local_n * sizeof(int));
-      if (!oracle)
-      {
-        if (rank == 0)
-          fprintf(stderr, "malloc failed\n");
-        MPI_Abort(comm, 1);
-      }
-      MPI_Allreduce(orig, oracle, local_n, MPI_INT, MPI_SUM, comm);
-      free(orig);
-      for (int i = 0; i < local_n; i++)
-      {
-        if (local[i] != oracle[i])
-        {
-          fprintf(stderr, "Rank %d FAIL stacked at i=%d got=%d want=%d\n", rank,
-                  i, local[i], oracle[i]);
-          MPI_Abort(comm, 2);
-        }
-      }
-      free(oracle);
+    }
+    else if (strcmp(impl, "naive") == 0)
+    {
+      computed = NaiveAllReduce_IntSum(local_sum, comm);
+    }
+    else if (strcmp(impl, "cube") == 0)
+    {
+      computed = HypercubicAllReduce_IntSum(local_sum, comm);
     }
     else
     {
-      int computed = 0;
-      if (strcmp(impl, "naive") == 0)
-        computed = NaiveAllReduce_IntSum(local_sum, comm);
-      else if (strcmp(impl, "cube") == 0)
-        computed = HypercubicAllReduce_IntSum(local_sum, comm);
-      else
-        computed = 0, MPI_Allreduce(&local_sum, &computed, 1, MPI_INT, MPI_SUM,
-                                    comm); // "mpi" default
-
-      // verify against MPI's answer
-      int oracle = 0;
-      MPI_Allreduce(&local_sum, &oracle, 1, MPI_INT, MPI_SUM, comm);
-      if (computed != oracle)
-      {
-        fprintf(stderr, "Rank %d FAIL scalar got=%d want=%d\n", rank, computed,
-                oracle);
-        MPI_Abort(comm, 2);
-      }
+      MPI_Allreduce(&local_sum, &computed, 1, MPI_INT, MPI_SUM, comm);
     }
 
     MPI_Barrier(comm);
     double t3 = MPI_Wtime();
 
+    // --- verification (outside timed section) ---
+    if (strcmp(impl, "stacked") == 0)
+    {
+      int *oracle = (int *)malloc((size_t)local_n * sizeof(int));
+      if (!oracle)
+        MPI_Abort(comm, 1);
+      MPI_Allreduce(orig, oracle, local_n, MPI_INT, MPI_SUM, comm);
+      for (int i = 0; i < local_n; i++)
+      {
+        if (local[i] != oracle[i])
+        {
+          fprintf(stderr, "Rank %d FAIL stacked at i=%d got=%d want=%d\n",
+                  rank, i, local[i], oracle[i]);
+          MPI_Abort(comm, 2);
+        }
+      }
+      free(oracle);
+      free(orig);
+    }
+    else
+    {
+      int oracle = 0;
+      MPI_Allreduce(&local_sum, &oracle, 1, MPI_INT, MPI_SUM, comm);
+      if (computed != oracle)
+      {
+        fprintf(stderr, "Rank %d FAIL %s got=%d want=%d\n", rank, impl,
+                computed, oracle);
+        MPI_Abort(comm, 2);
+      }
+    }
+
     double t_step2 = t3 - t2;
     double t_total = t_local + t_step2;
 
-    // use the slowest rank's time so we capture the real wall time
     double max_local, max_step2, max_total;
     MPI_Allreduce(&t_local, &max_local, 1, MPI_DOUBLE, MPI_MAX, comm);
     MPI_Allreduce(&t_step2, &max_step2, 1, MPI_DOUBLE, MPI_MAX, comm);
@@ -253,12 +224,87 @@ int main(int argc, char **argv)
 
   if (rank == 0)
   {
-    printf("%s,%d,%d,%d,%.9f,%.9f,%.9f\n", impl, n, p, local_n, best_local,
-           best_step2, best_total);
-    fflush(stdout);
+    fprintf(outfp, "%s,%d,%d,%d,%.9f,%.9f,%.9f\n", impl, n, p, local_n,
+            best_local, best_step2, best_total);
+    fflush(outfp);
   }
 
   free(local);
+}
+
+int main(int argc, char **argv)
+{
+  MPI_Init(&argc, &argv);
+
+  MPI_Comm comm = MPI_COMM_WORLD;
+  int rank, p;
+  MPI_Comm_rank(comm, &rank);
+  MPI_Comm_size(comm, &p);
+
+  int reps = (argc > 1) ? atoi(argv[1]) : 5;
+
+  if (!is_pow2(p))
+  {
+    if (rank == 0)
+      fprintf(stderr, "p must be power of 2\n");
+    MPI_Abort(comm, 1);
+  }
+
+  const char *impls[] = {"naive", "cube", "mpi", "stacked"};
+  int num_impls = 4;
+
+  for (int im = 0; im < num_impls; im++)
+  {
+    const char *impl = impls[im];
+
+    // rank 0: open the output file (append), write header if file is new/empty
+    FILE *outfp = NULL;
+    if (rank == 0)
+    {
+      char fname[64];
+      snprintf(fname, sizeof(fname), "results_%s.csv", impl);
+
+      // check if file already has content
+      int need_header = 1;
+      FILE *test = fopen(fname, "r");
+      if (test)
+      {
+        if (fgetc(test) != EOF)
+          need_header = 0;
+        fclose(test);
+      }
+
+      outfp = fopen(fname, "a");
+      if (!outfp)
+      {
+        fprintf(stderr, "cannot open %s\n", fname);
+        MPI_Abort(comm, 1);
+      }
+      if (need_header)
+        fprintf(outfp, "impl,n,p,local_n,t_local,t_step2,t_total\n");
+    }
+
+    // loop over n = 2^1 .. 2^20
+    for (int log_n = 1; log_n <= 20; log_n++)
+    {
+      int n = 1 << log_n;
+      if (n <= p)
+        continue;
+      if (n % p != 0)
+        continue;
+
+      run_experiment(impl, n, reps, comm, outfp);
+    }
+
+    if (rank == 0)
+    {
+      fclose(outfp);
+      char fname[64];
+      snprintf(fname, sizeof(fname), "results_%s.csv", impl);
+      fprintf(stderr, "Done: %s (p=%d)\n", fname, p);
+    }
+  }
+
   MPI_Finalize();
   return 0;
 }
