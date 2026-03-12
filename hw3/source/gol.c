@@ -280,6 +280,24 @@ int main(int argc, char **argv)
         printf("Total comp time:      %.6f s\n", max_total - max_comm);
         printf("Comm %%:               %.2f%%\n", 100.0 * max_comm / max_total);
         printf("Comp %%:               %.2f%%\n", 100.0 * (max_total - max_comm) / max_total);
+
+        // write to CSV for analysis
+        FILE *csv = fopen("results.csv", "a");
+        if (csv) {
+            // check if file is empty (first write) to add headers
+            fseek(csv, 0, SEEK_END);
+            long size = ftell(csv);
+            if (size == 0) {
+                fprintf(csv, "n,G,p,total_runtime,avg_time_per_gen,comm_time,comp_time,comm_pct,comp_pct\n");
+            }
+            // append data row
+            fprintf(csv, "%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.2f,%.2f\n",
+                    n, G, nprocs, max_total, max_total / G, max_comm,
+                    max_total - max_comm,
+                    100.0 * max_comm / max_total,
+                    100.0 * (max_total - max_comm) / max_total);
+            fclose(csv);
+        }
     }
 
     free(grid);
